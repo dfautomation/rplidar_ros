@@ -32,8 +32,11 @@
  *
  */
 
+#include "dynamic_reconfigure/server.h"
 #include "ros/ros.h"
+#include "rplidar_ros/RPlidarConfig.h"
 #include "sensor_msgs/LaserScan.h"
+#include "sstream"
 #include "std_srvs/Empty.h"
 #include "rplidar.h"
 
@@ -46,6 +49,7 @@
 using namespace rp::standalone::rplidar;
 
 RPlidarDriver * drv = NULL;
+std::vector<std::pair<float, float> > g_mask_ranges;
 
 void publish_scan(ros::Publisher *pub,
                   rplidar_response_measurement_node_hq_t *nodes,
@@ -82,22 +86,56 @@ void publish_scan(ros::Publisher *pub,
     scan_msg.ranges.resize(node_count);
     bool reverse_data = (!inverted && reversed) || (inverted && !reversed);
     if (!reverse_data) {
+        int j = 0, jn = g_mask_ranges.size();
         for (size_t i = 0; i < node_count; i++) {
+            bool masked = false;
+            float angle = scan_msg.angle_min + scan_msg.angle_increment * i;
+            while (j < jn && angle > g_mask_ranges[j].second)
+            {
+                ++j;
+            }
+            if (j < jn && angle > g_mask_ranges[j].first)
+            {
+                masked = true;
+            }
+
             float read_value = (float) nodes[i].dist_mm_q2/4.0f/1000;
-            if (read_value == 0.0)
+            if (read_value == 0.0 || masked)
+            {
                 scan_msg.ranges[i] = std::numeric_limits<float>::infinity();
+                scan_msg.intensities[i] = 0.0f;
+            }
             else
+            {
                 scan_msg.ranges[i] = read_value;
-            scan_msg.intensities[i] = (float) (nodes[i].quality >> 2);
+                scan_msg.intensities[i] = (float) (nodes[i].quality >> 2);
+            }
         }
     } else {
+        int j = g_mask_ranges.size() - 1;
         for (size_t i = 0; i < node_count; i++) {
+            bool masked = false;
+            float angle = scan_msg.angle_min + scan_msg.angle_increment * (node_count-1-i);
+            while (j >= 0 && angle < g_mask_ranges[j].first)
+            {
+                --j;
+            }
+            if (j >= 0 && angle < g_mask_ranges[j].second)
+            {
+                masked = true;
+            }
+
             float read_value = (float)nodes[i].dist_mm_q2/4.0f/1000;
-            if (read_value == 0.0)
+            if (read_value == 0.0 || masked)
+            {
                 scan_msg.ranges[node_count-1-i] = std::numeric_limits<float>::infinity();
+                scan_msg.intensities[node_count-1-i] = 0.0f;
+            }
             else
+            {
                 scan_msg.ranges[node_count-1-i] = read_value;
-            scan_msg.intensities[node_count-1-i] = (float) (nodes[i].quality >> 2);
+                scan_msg.intensities[node_count-1-i] = (float) (nodes[i].quality >> 2);
+            }
         }
     }
 
@@ -182,6 +220,29 @@ static float getAngle(const rplidar_response_measurement_node_hq_t& node)
     return node.angle_z_q14 * 90.f / 16384.f;
 }
 
+void configCallback(rplidar_ros::RPlidarConfig& config, uint32_t level)
+{
+  g_mask_ranges.clear();
+  std::istringstream iss(config.scan_mask);
+
+  float f, start, end;
+  bool even = false;
+
+  while (iss >> f)
+  {
+    if (!even)
+    {
+      start = f * M_PI / 180.0f;
+    }
+    else
+    {
+      end = f * M_PI / 180.0f;
+      g_mask_ranges.push_back(std::make_pair(start, end));
+    }
+    even = !even;
+  }
+}
+
 int main(int argc, char * argv[]) {
     ros::init(argc, argv, "rplidar_node");
     
@@ -208,6 +269,10 @@ int main(int argc, char * argv[]) {
     nh_private.param<bool>("inverted", inverted, false);
     nh_private.param<bool>("angle_compensate", angle_compensate, false);
     nh_private.param<std::string>("scan_mode", scan_mode, std::string());
+
+    // dynamic reconfigure
+    dynamic_reconfigure::Server<rplidar_ros::RPlidarConfig> ds_;
+    ds_.setCallback(configCallback);
 
     ROS_INFO("RPLIDAR running on ROS package rplidar_ros. SDK Version:"RPLIDAR_SDK_VERSION"");
 
